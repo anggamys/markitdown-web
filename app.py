@@ -1,7 +1,7 @@
 """MarkItDown Web Converter — Streamlit UI.
 
 Workflow: Upload -> Validate -> Convert -> Preview -> Download.
-Conversion itself lives in src/services/conversion_service.py (MarkItDown engine).
+Conversion itself lives in src/services/ (MarkItDown engine + batch orchestration).
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ import logging
 import streamlit as st
 
 from src.config.settings import MVP_SUPPORTED_EXTENSIONS, get_settings
+from src.services.batch_service import BatchService
 from src.services.conversion_service import ConversionService
 from src.services.validation_service import ValidationService
+from src.utils.cleaning import CleaningOptions, clean_markdown
 from src.utils.file_utils import create_zip, get_output_filename, human_readable_size
 from src.utils.markdown_utils import markdown_stats
 
@@ -21,6 +23,7 @@ logging.basicConfig(level=logging.INFO)
 settings = get_settings()
 validator = ValidationService(settings)
 converter = ConversionService(settings)
+batch = BatchService(validator, converter)
 
 st.set_page_config(page_title="MarkItDown Web Converter", page_icon="📄", layout="wide")
 
@@ -52,6 +55,13 @@ with st.sidebar:
         value=settings.enable_plugins,
         help="Advanced option. MarkItDown plugins are disabled by default.",
     )
+    st.subheader("Cleaning")
+    cleaning = CleaningOptions(
+        normalize_unicode=st.checkbox("Normalize unicode", value=True),
+        strip_trailing_whitespace=st.checkbox("Strip trailing whitespace", value=True),
+        collapse_blank_lines=st.checkbox("Collapse blank lines", value=True),
+        remove_empty_lines=st.checkbox("Remove all empty lines", value=False),
+    )
     st.divider()
     st.subheader("Limits")
     st.write(f"Max file size: **{settings.max_file_size_mb} MB**")
@@ -73,7 +83,7 @@ st.subheader("Files")
 valid_files = []
 for f in uploaded_files:
     data = f.getvalue()
-    check = validator.validate(f.name, len(data))
+    check = validator.validate(f.name, len(data), data)
     if check.valid:
         valid_files.append(f)
         st.success(f"✓ **{f.name}** — {human_readable_size(len(data))}")
@@ -97,29 +107,21 @@ results = []
 progress = st.progress(0, text="Converting...")
 for i, f in enumerate(uploaded_files):
     data = f.getvalue()
-    check = validator.validate(f.name, len(data))
-    if not check.valid:
-        results.append((f.name, None, check.error))
-        progress.progress((i + 1) / len(uploaded_files))
-        continue
     with st.status(f"Converting **{f.name}**...", expanded=False) as s:
-        res = converter.convert_bytes(data, f.name, enable_plugins=enable_plugins)
+        res = batch.convert_one(f.name, data, enable_plugins=enable_plugins)
         if res.succeeded:
+            cleaned = clean_markdown(res.markdown, cleaning)
+            res.markdown = cleaned
+            res.output_size_bytes = len(cleaned.encode("utf-8"))
             s.update(label=f"✓ {f.name} converted", state="complete")
         else:
             s.update(label=f"✗ {f.name} failed", state="error")
-    results.append(
-        (
-            f.name,
-            res if res.succeeded else None,
-            "" if res.succeeded else res.error_message,
-        )
-    )
+    results.append(res)
     progress.progress((i + 1) / len(uploaded_files))
 progress.empty()
 
-successes = [(name, r) for name, r, _ in results if r is not None]
-failures = [(name, err) for name, r, err in results if r is None]
+successes = [r for r in results if r.succeeded]
+failures = [r for r in results if not r.succeeded]
 
 st.subheader("Conversion Result")
 cols = st.columns(3)
@@ -129,12 +131,12 @@ cols[2].metric("Failed", len(failures))
 
 if failures:
     with st.expander(f"Failed files ({len(failures)})", expanded=True):
-        for name, err in failures:
-            st.error(f"**{name}** — {err}")
+        for res in failures:
+            st.error(f"**{res.source_filename}** — {res.error_message}")
 
 # Batch download
 if len(successes) > 1:
-    zip_bytes = create_zip([(r.output_filename, r.markdown) for _, r in successes])
+    zip_bytes = create_zip([(r.output_filename, r.markdown) for r in successes])
     st.download_button(
         "Download All (.zip)",
         data=zip_bytes,
@@ -145,20 +147,23 @@ if len(successes) > 1:
 # Per-file results
 view_mode = st.radio("Preview mode", ["Rendered", "Raw Markdown"], horizontal=True)
 
-for name, res in successes:
-    if res is None:
-        continue
+for res in successes:
     stats = markdown_stats(res.markdown)
     with st.expander(
-        f"✓ {name} → {res.output_filename}", expanded=(len(successes) == 1)
+        f"✓ {res.source_filename} → {res.output_filename}",
+        expanded=(len(successes) == 1),
     ):
-        meta = (
+        st.caption(
             f"Processing time: **{res.processing_time_s:.2f}s** · "
             f"Input: **{human_readable_size(res.input_size_bytes)}** · "
-            f"Output: **{human_readable_size(res.output_size_bytes)}** · "
-            f"{stats['words']} words, {stats['lines']} lines"
+            f"Output: **{human_readable_size(res.output_size_bytes)}**"
         )
-        st.caption(meta)
+        st.caption(
+            f"{stats['words']:,} words · {stats['characters']:,} characters · "
+            f"{stats['headings']} headings · {stats['tables']} tables · "
+            f"{stats['images']} images · {stats['links']} links · "
+            f"{stats['paragraphs']} paragraphs"
+        )
         if view_mode == "Rendered":
             st.markdown(res.markdown or "*Empty document.*")
         else:
@@ -166,9 +171,9 @@ for name, res in successes:
         st.download_button(
             f"Download {res.output_filename}",
             data=res.markdown.encode("utf-8"),
-            file_name=res.output_filename or get_output_filename(name),
+            file_name=res.output_filename or get_output_filename(res.source_filename),
             mime="text/markdown",
-            key=f"dl-{name}",
+            key=f"dl-{res.source_filename}",
         )
 
 if not successes and failures:

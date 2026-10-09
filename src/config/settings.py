@@ -19,6 +19,7 @@ def _get_bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "development"))
     max_file_size_mb: int = field(
         default_factory=lambda: _get_int("MAX_FILE_SIZE_MB", 50)
     )

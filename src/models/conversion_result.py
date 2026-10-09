@@ -22,6 +22,7 @@ class ConversionResult:
     status: ConversionStatus = ConversionStatus.IDLE
     markdown: str = ""
     error_message: str = ""
+    error_category: str = ""
     processing_time_s: float = 0.0
     input_size_bytes: int = 0
     output_size_bytes: int = 0
@@ -37,21 +38,13 @@ class ConversionResult:
         error_message: str,
         processing_time_s: float = 0.0,
         input_size_bytes: int = 0,
+        error_category: str = "conversion",
     ) -> ConversionResult:
         return cls(
             source_filename=source_filename,
             status=ConversionStatus.FAILED,
             error_message=error_message,
+            error_category=error_category,
             processing_time_s=processing_time_s,
             input_size_bytes=input_size_bytes,
         )
-
-
-@dataclass
-class FileMetadata:
-    filename: str
-    extension: str
-    size_bytes: int
-    status: ConversionStatus = ConversionStatus.UPLOADED
-    processing_time_s: float = 0.0
-    output_size_bytes: int = 0
