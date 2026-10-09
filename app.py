@@ -1,0 +1,157 @@
+"""MarkItDown Web Converter — Streamlit UI.
+
+Workflow: Upload -> Validate -> Convert -> Preview -> Download.
+Conversion itself lives in src/services/conversion_service.py (MarkItDown engine).
+"""
+
+from __future__ import annotations
+
+import logging
+
+import streamlit as st
+
+from src.config.settings import MVP_SUPPORTED_EXTENSIONS, get_settings
+from src.services.conversion_service import ConversionService
+from src.services.validation_service import ValidationService
+from src.utils.file_utils import create_zip, get_output_filename, human_readable_size
+from src.utils.markdown_utils import markdown_stats
+
+logging.basicConfig(level=logging.INFO)
+
+settings = get_settings()
+validator = ValidationService(settings)
+converter = ConversionService(settings)
+
+st.set_page_config(page_title="MarkItDown Web Converter", page_icon="📄", layout="wide")
+
+st.title("MarkItDown Web Converter")
+st.caption("Convert documents into Markdown — powered by Microsoft MarkItDown.")
+
+with st.sidebar:
+    st.header("Options")
+    enable_plugins = st.checkbox(
+        "Enable plugins",
+        value=settings.enable_plugins,
+        help="Advanced option. MarkItDown plugins are disabled by default.",
+    )
+    st.divider()
+    st.subheader("Limits")
+    st.write(f"Max file size: **{settings.max_file_size_mb} MB**")
+    st.subheader("Supported formats (MVP)")
+    st.write(" ".join(f"`{e}`" for e in sorted(MVP_SUPPORTED_EXTENSIONS)))
+
+uploaded_files = st.file_uploader(
+    "Drag & drop files here or browse",
+    accept_multiple_files=True,
+    help=f"Supported: {', '.join(sorted(MVP_SUPPORTED_EXTENSIONS))}",
+)
+
+if not uploaded_files:
+    st.info("Upload one or more documents to get started.")
+    st.stop()
+
+# --- Validation overview -----------------------------------------------------
+st.subheader("Files")
+valid_files = []
+for f in uploaded_files:
+    data = f.getvalue()
+    check = validator.validate(f.name, len(data))
+    if check.valid:
+        valid_files.append(f)
+        st.success(f"✓ **{f.name}** — {human_readable_size(len(data))}")
+    else:
+        st.error(f"✗ **{f.name}** — {check.error}")
+
+convert_clicked = st.button(
+    "Convert",
+    type="primary",
+    disabled=not valid_files,
+    help="Convert all valid files to Markdown."
+    if valid_files
+    else "No valid files to convert.",
+)
+
+if not convert_clicked:
+    st.stop()
+
+# --- Conversion (per-file isolation: one failure never stops the batch) ------
+results = []
+progress = st.progress(0, text="Converting...")
+for i, f in enumerate(uploaded_files):
+    data = f.getvalue()
+    check = validator.validate(f.name, len(data))
+    if not check.valid:
+        results.append((f.name, None, check.error))
+        progress.progress((i + 1) / len(uploaded_files))
+        continue
+    with st.status(f"Converting **{f.name}**...", expanded=False) as s:
+        res = converter.convert_bytes(data, f.name, enable_plugins=enable_plugins)
+        if res.succeeded:
+            s.update(label=f"✓ {f.name} converted", state="complete")
+        else:
+            s.update(label=f"✗ {f.name} failed", state="error")
+    results.append(
+        (
+            f.name,
+            res if res.succeeded else None,
+            "" if res.succeeded else res.error_message,
+        )
+    )
+    progress.progress((i + 1) / len(uploaded_files))
+progress.empty()
+
+successes = [(name, r) for name, r, _ in results if r is not None]
+failures = [(name, err) for name, r, err in results if r is None]
+
+st.subheader("Conversion Result")
+cols = st.columns(3)
+cols[0].metric("Total", len(results))
+cols[1].metric("Succeeded", len(successes))
+cols[2].metric("Failed", len(failures))
+
+if failures:
+    with st.expander(f"Failed files ({len(failures)})", expanded=True):
+        for name, err in failures:
+            st.error(f"**{name}** — {err}")
+
+# --- Batch download ----------------------------------------------------------
+if len(successes) > 1:
+    zip_bytes = create_zip([(r.output_filename, r.markdown) for _, r in successes])
+    st.download_button(
+        "Download All (.zip)",
+        data=zip_bytes,
+        file_name="converted-files.zip",
+        mime="application/zip",
+    )
+
+# --- Per-file results --------------------------------------------------------
+view_mode = st.radio("Preview mode", ["Rendered", "Raw Markdown"], horizontal=True)
+
+for name, res in successes:
+    if res is None:
+        continue
+    stats = markdown_stats(res.markdown)
+    with st.expander(
+        f"✓ {name} → {res.output_filename}", expanded=(len(successes) == 1)
+    ):
+        meta = (
+            f"Processing time: **{res.processing_time_s:.2f}s** · "
+            f"Input: **{human_readable_size(res.input_size_bytes)}** · "
+            f"Output: **{human_readable_size(res.output_size_bytes)}** · "
+            f"{stats['words']} words, {stats['lines']} lines"
+        )
+        st.caption(meta)
+        if view_mode == "Rendered":
+            st.markdown(res.markdown or "*Empty document.*")
+        else:
+            st.code(res.markdown or "", language="markdown")
+        st.download_button(
+            f"Download {res.output_filename}",
+            data=res.markdown.encode("utf-8"),
+            file_name=res.output_filename or get_output_filename(name),
+            mime="text/markdown",
+            key=f"dl-{name}",
+        )
+
+if not successes and failures:
+    st.warning("All conversions failed. Check that files are valid and not corrupted.")
