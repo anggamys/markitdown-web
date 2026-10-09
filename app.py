@@ -27,6 +27,24 @@ st.set_page_config(page_title="MarkItDown Web Converter", page_icon="📄", layo
 st.title("MarkItDown Web Converter")
 st.caption("Convert documents into Markdown — powered by Microsoft MarkItDown.")
 
+# Keep wide tables readable: horizontal scroll inside the page instead of
+# overflowing it, without forcing cell content to wrap.
+st.markdown(
+    """<style>
+    [data-testid="stMarkdownContainer"] table {
+        display: block;
+        max-width: 100%;
+        overflow-x: auto;
+        white-space: nowrap;
+    }
+    [data-testid="stMarkdownContainer"] th,
+    [data-testid="stMarkdownContainer"] td {
+        white-space: nowrap;
+    }
+    </style>""",
+    unsafe_allow_html=True,
+)
+
 with st.sidebar:
     st.header("Options")
     enable_plugins = st.checkbox(
@@ -50,7 +68,7 @@ if not uploaded_files:
     st.info("Upload one or more documents to get started.")
     st.stop()
 
-# --- Validation overview -----------------------------------------------------
+# Validation overview
 st.subheader("Files")
 valid_files = []
 for f in uploaded_files:
@@ -74,7 +92,7 @@ convert_clicked = st.button(
 if not convert_clicked:
     st.stop()
 
-# --- Conversion (per-file isolation: one failure never stops the batch) ------
+# Conversion (per-file isolation: one failure never stops the batch)
 results = []
 progress = st.progress(0, text="Converting...")
 for i, f in enumerate(uploaded_files):
@@ -114,7 +132,7 @@ if failures:
         for name, err in failures:
             st.error(f"**{name}** — {err}")
 
-# --- Batch download ----------------------------------------------------------
+# Batch download
 if len(successes) > 1:
     zip_bytes = create_zip([(r.output_filename, r.markdown) for _, r in successes])
     st.download_button(
@@ -124,7 +142,7 @@ if len(successes) > 1:
         mime="application/zip",
     )
 
-# --- Per-file results --------------------------------------------------------
+# Per-file results
 view_mode = st.radio("Preview mode", ["Rendered", "Raw Markdown"], horizontal=True)
 
 for name, res in successes:
